@@ -1,12 +1,28 @@
-# Locality-Aware Parallel SpMV
+# SpMV Performance Study: Roofline, OpenMP, and MPI
 
-研究問題：SpMV 裡 memory locality 和 parallelism 怎麼互相影響，以及 data layout / reordering 在 CPU 和 GPU 上什麼時候真的有用。
+Sparse matrix-vector multiplication (`y = Ax`, double precision), built step by step to answer the questions in lecture 12 with measurements from one machine. Each nonzero costs one multiply-add (2 flops) but requires loading a value and a column index, so the kernel is expected to be memory-bound, not compute-bound.
 
-這個目錄現在有 serial CSR benchmark，以及第一步的 dense matvec 和 single-thread roofline。kernel、byte model、計時方式寫在 [docs/methodology.md](docs/methodology.md)。OpenMP、reordering、SELL、GPU 會沿用同一組定義。
+The project uses SpMV to cover three parts of the course:
+
+- single-node locality and the roofline model (lectures 4, 5, 12)
+- shared-memory parallelism with OpenMP (lectures 6, 12)
+- distributed-memory partitioning and communication cost with MPI (lectures 9–12)
+
+Goals and milestones are in [docs/goals.md](docs/goals.md). The kernel, byte model, and timing rules are fixed in [docs/methodology.md](docs/methodology.md); later milestones reuse the same definitions.
+
+## Status
+
+| Milestone | Question | State |
+| --- | --- | --- |
+| M1 serial CSR + roofline | Is SpMV memory-bound on this machine? | done |
+| M2 OpenMP row-parallel | Why does adding cores stop helping? | next |
+| M3 register blocking | Once bandwidth is saturated, does reading less data help? | planned |
+| M4 MPI 1D row / 1D column / 2D | How much does each partitioning pay in communication? | planned |
+| M5 graph partitioning | Does reordering reduce off-block nonzeros and communication? | planned |
 
 ## Build
 
-在 WSL 裡：
+Inside WSL:
 
 ```bash
 cd ~/projects/spMV
@@ -15,29 +31,31 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-效能數字只用 Release（`-O3 -march=native`，沒有 `-ffast-math`，沒有 LTO）。
+Performance numbers come from Release only (`-O3 -march=native`, no `-ffast-math`, no LTO).
 
 ## Run
 
 ```bash
 ./build/spmv benchmarks/tiny.mtx --check
 ./build/spmv benchmarks/tiny.mtx --check --csv-out results/tiny.csv
+./build/spmv --dense 4096
+./build/spmv --machine
 ```
 
-`--check` 用一組會隨 column 變化的 `x`，對 CSR 和 triplet reference。計時本身的 `x` 是全 1。
+`--check` compares CSR against a triplet reference using an `x` that varies by column. Timed runs use `x = 1`.
 
-輸出裡和 milestone exit condition 對應的欄位：
+Output columns that map to the milestone exit conditions:
 
-| 欄位 | 意義 |
+| Column | Meaning |
 | --- | --- |
-| `matrix`, `nrows`, `nnz` | 矩陣、列數、CSR 非零元數 |
-| `median_s` | 一次 SpMV 的 median 時間 |
+| `matrix`, `nrows`, `nnz` | matrix, row count, CSR nonzero count |
+| `median_s` | median time of one SpMV |
 | `gflops` | `2 * nnz / time / 1e9` |
-| `gbps_x_reused`, `gbps_x_reloaded` | 兩種 `x` 流量模型下的估計頻寬 |
+| `gbps_x_reused`, `gbps_x_reloaded` | estimated bandwidth under the two `x` traffic models |
 
-`benchmarks/tiny.mtx` 只驗證管線。它的 GFLOP/s 是函式呼叫的開銷，不能拿來當性能結論。
+`benchmarks/tiny.mtx` only validates the pipeline. Its GFLOP/s reflects call overhead and is not a performance result.
 
-對稱矩陣會展開成完整 CSR。`stored_nnz` 對得上 SuiteSparse 網頁上的 nnz；`nnz` 是 kernel 真正做的非零元數。
+Symmetric matrices are expanded to full CSR. `stored_nnz` matches the nnz shown on the SuiteSparse website; `nnz` is the number of nonzeros the kernel actually processes.
 
 ## SuiteSparse
 
@@ -47,38 +65,38 @@ bash scripts/download_matrices.sh
 ./build/spmv data/bcsstk17.mtx --csv-out results/spmv.csv
 ```
 
-清單在 `scripts/matrices.txt`。結構故意岔開：小的非對稱化學矩陣、帶狀結構矩陣、蛋白質、FEM、電路、經濟模型、圖。下載的 `.mtx` 在 `data/`，不進 git。
+The list is in `scripts/matrices.txt`. The structures are deliberately varied: a small unsymmetric chemistry matrix, banded structural matrices, protein, FEM, circuit, economics, and graph. Downloaded `.mtx` files go to `data/` and are not tracked in git. If `sparse.tamu.edu` returns 403, the script falls back to the old UF mirror.
 
-有 matplotlib 的話，第一步整組圖表：
+With matplotlib installed, the full M1 set of figures and tables:
 
 ```bash
 bash scripts/run_m1.sh
 ```
 
-這會下載 `scripts/matrices.txt` 裡的矩陣，量 single-thread 的 FMA peak 和 STREAM triad，跑 serial CSR 和 `--dense 4096`，並寫出：
+This downloads the matrices in `scripts/matrices.txt`, measures the single-thread FMA peak and STREAM triad, runs serial CSR and `--dense 4096`, and writes:
 
 ```text
-results/m1.csv        每個矩陣一列
-results/machine.csv   peak GFLOP/s 和 STREAM GB/s
-results/table1.csv    n、nnz、nnz/row、GFLOP/s、兩種 arithmetic intensity
+results/m1.csv        one row per matrix
+results/machine.csv   peak GFLOP/s and STREAM GB/s
+results/table1.csv    n, nnz, nnz/row, GFLOP/s, both arithmetic intensities
 plots/gflops.png      Figure 1
 plots/roofline.png    Figure 2
 ```
 
+## M1 results (i5-13420H, single thread)
+
+Measured roofs: 39.05 GFLOP/s peak (AVX2 FMA), 10.37 GB/s STREAM triad, ridge point ≈ 3.8 FLOP/byte. All matrices have arithmetic intensity between 0.10 and 0.25 FLOP/byte and run at 0.9–2.1 GFLOP/s, on the memory slope of the roofline. `scircuit` falls below the STREAM line because of irregular access to `x`.
+
 ## Layout
 
 ```text
-include/     CSR、loader、計時的 header
-src/         serial kernel、Matrix Market、byte model、benchmark
-benchmarks/  給測試用的小矩陣
-tests/       正確性
-scripts/     下載矩陣、畫 GFLOP/s
-docs/        凍結的方法論
-data/        SuiteSparse（下載後才有）
+include/     headers for CSR, loader, timing
+src/         serial kernel, Matrix Market loader, byte model, benchmark
+benchmarks/  small matrices for tests
+tests/       correctness
+scripts/     matrix download, runs, plots
+docs/        goals and frozen methodology
+data/        SuiteSparse matrices (after download)
 results/     CSV
-plots/       圖
+plots/       figures
 ```
-
-## 目標
-
-整個 project 對應 CSE 6230 lecture 12。做到哪一步、每一步要交出什麼，寫在 [docs/goals.md](docs/goals.md)。下一步是 OpenMP 列並行。
