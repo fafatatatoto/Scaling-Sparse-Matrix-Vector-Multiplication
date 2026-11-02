@@ -1,0 +1,10 @@
+# group name
+# Symmetric matrices are stored as one triangle. The loader expands them.
+HB west0479
+HB bcsstk17
+Williams pdb1HYS
+Williams consph
+Williams cant
+Hamm scircuit
+Williams mac_econ_fwd500
+vanHeukelum cage12
